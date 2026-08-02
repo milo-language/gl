@@ -1,0 +1,390 @@
+// gl/raw — raw OpenGL 3.3 core bindings.
+//
+// This is the unsafe floor: one `extern fn` per GL entry point, one `let` per
+// constant, and nothing else. Use `std/gpu` unless you need a call this does not
+// wrap — `gl` owns the shader/buffer/texture/framebuffer lifecycles and keeps the
+// raw pointers out of your program.
+//
+// The link flag comes from `link.darwin.milo` / `link.linux.milo`, the one pair of
+// files that differs per platform: `-framework OpenGL` on darwin, `-lGL` elsewhere.
+// Windows is not a target of this package — `opengl32.dll` exports GL 1.1 only, so
+// every 3.3 entry point here would be an undefined symbol. `milo.json` says so.
+//
+// A current GL context is a precondition of every call. Creating one is the
+// window system's job, not this module's: with SDL2 that is
+// `SDL_GL_SetAttribute` + `SDL_WINDOW_OPENGL` + `SDL_GL_CreateContext`. Calling
+// into GL with no context bound is undefined behaviour, not an error return.
+//
+// Every pointer parameter is declared with the pointee GL actually writes or
+// reads: `*u32` for a GLuint name, `*i32` for a GLint or GLsizei out-param,
+// `*f32` for a float array. That is not decoration — an out-param is the callee
+// writing into the caller's frame, so the pointee width IS the contract, and a
+// local of the wrong type is a stack overwrite that links and runs. Spelled
+// precisely, the call site needs no cast and the checker rejects the mismatch.
+//
+// `*u8` appears only where C really says `void *` (pixel and vertex payloads,
+// whose element type is a runtime GLenum) or where the pointer value is a byte
+// offset rather than an address.
+//
+// Each declaration carries `@cSig`, so the claim is checked against the real GL
+// header at build time on any machine that has one. The two spellings cover
+// macOS and Mesa; a machine with neither gets a named warning, not a silent pass.
+
+// ── state ─────────────────────────────────────────────────────────────────────
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glClearColor(GLfloat, GLfloat, GLfloat, GLfloat)")
+pub extern fn glClearColor(r: f32, g: f32, b: f32, a: f32)
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glClear(GLbitfield)")
+pub extern fn glClear(mask: u32)
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glViewport(GLint, GLint, GLsizei, GLsizei)")
+pub extern fn glViewport(x: i32, y: i32, w: i32, h: i32)
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glScissor(GLint, GLint, GLsizei, GLsizei)")
+pub extern fn glScissor(x: i32, y: i32, w: i32, h: i32)
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glEnable(GLenum)")
+pub extern fn glEnable(cap: u32)
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glDisable(GLenum)")
+pub extern fn glDisable(cap: u32)
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glBlendFunc(GLenum, GLenum)")
+pub extern fn glBlendFunc(src: u32, dst: u32)
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glDepthFunc(GLenum)")
+pub extern fn glDepthFunc(func: u32)
+
+// GLboolean, so 0 or 1 — anything else is out of contract.
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glDepthMask(GLboolean)")
+pub extern fn glDepthMask(flag: u8)
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glCullFace(GLenum)")
+pub extern fn glCullFace(mode: u32)
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glFrontFace(GLenum)")
+pub extern fn glFrontFace(mode: u32)
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glPixelStorei(GLenum, GLint)")
+pub extern fn glPixelStorei(pname: u32, param: i32)
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glFinish(void)")
+pub extern fn glFinish()
+
+
+// Returns a static NUL-terminated string owned by the driver — read it with
+// std/cstr, never free it.
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "const GLubyte *glGetString(GLenum)")
+pub extern fn glGetString(name: u32): *u8
+
+// ── shaders ───────────────────────────────────────────────────────────────────
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "GLuint glCreateShader(GLenum)")
+pub extern fn glCreateShader(kind: u32): u32
+
+// `lengths` may be NULL, meaning every source string is NUL-terminated.
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glShaderSource(GLuint, GLsizei, const GLchar *const*, const GLint *)")
+pub extern fn glShaderSource(shader: u32, count: i32, strings: **u8, lengths: *i32)
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glCompileShader(GLuint)")
+pub extern fn glCompileShader(shader: u32)
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glGetShaderiv(GLuint, GLenum, GLint *)")
+pub extern fn glGetShaderiv(shader: u32, pname: u32, out: *i32)
+
+// `length` may be NULL; `log` is a caller-owned buffer of `bufSize` bytes.
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glGetShaderInfoLog(GLuint, GLsizei, GLsizei *, GLchar *)")
+pub extern fn glGetShaderInfoLog(shader: u32, bufSize: i32, length: *i32, log: *u8)
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glDeleteShader(GLuint)")
+pub extern fn glDeleteShader(shader: u32)
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "GLuint glCreateProgram(void)")
+pub extern fn glCreateProgram(): u32
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glAttachShader(GLuint, GLuint)")
+pub extern fn glAttachShader(program: u32, shader: u32)
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glLinkProgram(GLuint)")
+pub extern fn glLinkProgram(program: u32)
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glGetProgramiv(GLuint, GLenum, GLint *)")
+pub extern fn glGetProgramiv(program: u32, pname: u32, out: *i32)
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glGetProgramInfoLog(GLuint, GLsizei, GLsizei *, GLchar *)")
+pub extern fn glGetProgramInfoLog(program: u32, bufSize: i32, length: *i32, log: *u8)
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glUseProgram(GLuint)")
+pub extern fn glUseProgram(program: u32)
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glDeleteProgram(GLuint)")
+pub extern fn glDeleteProgram(program: u32)
+
+// `name` is NUL-terminated. Returns -1 if the uniform is not active, which includes
+// "the linker optimised it away because nothing read it".
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "GLint glGetUniformLocation(GLuint, const GLchar *)")
+pub extern fn glGetUniformLocation(program: u32, name: *u8): i32
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glUniform1i(GLint, GLint)")
+pub extern fn glUniform1i(loc: i32, v0: i32)
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glUniform1f(GLint, GLfloat)")
+pub extern fn glUniform1f(loc: i32, v0: f32)
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glUniform2f(GLint, GLfloat, GLfloat)")
+pub extern fn glUniform2f(loc: i32, v0: f32, v1: f32)
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glUniform3f(GLint, GLfloat, GLfloat, GLfloat)")
+pub extern fn glUniform3f(loc: i32, v0: f32, v1: f32, v2: f32)
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glUniform4f(GLint, GLfloat, GLfloat, GLfloat, GLfloat)")
+pub extern fn glUniform4f(loc: i32, v0: f32, v1: f32, v2: f32, v3: f32)
+
+// `value` holds count*16 floats.
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glUniformMatrix4fv(GLint, GLsizei, GLboolean, const GLfloat *)")
+pub extern fn glUniformMatrix4fv(loc: i32, count: i32, transpose: u8, value: *f32)
+
+// ── buffers ───────────────────────────────────────────────────────────────────
+
+// The driver writes `n` names into `ids`.
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glGenBuffers(GLsizei, GLuint *)")
+pub extern fn glGenBuffers(n: i32, ids: *u32)
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glBindBuffer(GLenum, GLuint)")
+pub extern fn glBindBuffer(target: u32, id: u32)
+
+// `size` is a GLsizeiptr — pointer-sized, hence i64. `data` may be NULL to allocate
+// without uploading.
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glBufferData(GLenum, GLsizeiptr, const void *, GLenum)")
+pub extern fn glBufferData(target: u32, size: i64, data: *u8, usage: u32)
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glBufferSubData(GLenum, GLintptr, GLsizeiptr, const void *)")
+pub extern fn glBufferSubData(target: u32, offset: i64, size: i64, data: *u8)
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glDeleteBuffers(GLsizei, const GLuint *)")
+pub extern fn glDeleteBuffers(n: i32, ids: *u32)
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glGenVertexArrays(GLsizei, GLuint *)")
+pub extern fn glGenVertexArrays(n: i32, ids: *u32)
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glBindVertexArray(GLuint)")
+pub extern fn glBindVertexArray(id: u32)
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glDeleteVertexArrays(GLsizei, const GLuint *)")
+pub extern fn glDeleteVertexArrays(n: i32, ids: *u32)
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glEnableVertexAttribArray(GLuint)")
+pub extern fn glEnableVertexAttribArray(index: u32)
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glDisableVertexAttribArray(GLuint)")
+pub extern fn glDisableVertexAttribArray(index: u32)
+
+// GL reads `offset` as a byte offset into the bound buffer, not as an address —
+// pass `n as *u8`. That is why it is a pointer at all.
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glVertexAttribPointer(GLuint, GLint, GLenum, GLboolean, GLsizei, const void *)")
+pub extern fn glVertexAttribPointer(index: u32, size: i32, kind: u32, normalized: u8, stride: i32, offset: *u8)
+
+// ── textures ──────────────────────────────────────────────────────────────────
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glGenTextures(GLsizei, GLuint *)")
+pub extern fn glGenTextures(n: i32, ids: *u32)
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glBindTexture(GLenum, GLuint)")
+pub extern fn glBindTexture(target: u32, id: u32)
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glActiveTexture(GLenum)")
+pub extern fn glActiveTexture(unit: u32)
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glTexImage2D(GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void *)")
+pub extern fn glTexImage2D(target: u32, level: i32, internalFormat: i32, w: i32, h: i32, border: i32, format: u32, kind: u32, pixels: *u8)
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glTexSubImage2D(GLenum, GLint, GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, const void *)")
+pub extern fn glTexSubImage2D(target: u32, level: i32, x: i32, y: i32, w: i32, h: i32, format: u32, kind: u32, pixels: *u8)
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glTexParameteri(GLenum, GLenum, GLint)")
+pub extern fn glTexParameteri(target: u32, pname: u32, param: i32)
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glGenerateMipmap(GLenum)")
+pub extern fn glGenerateMipmap(target: u32)
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glDeleteTextures(GLsizei, const GLuint *)")
+pub extern fn glDeleteTextures(n: i32, ids: *u32)
+
+// ── framebuffers ──────────────────────────────────────────────────────────────
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glGenFramebuffers(GLsizei, GLuint *)")
+pub extern fn glGenFramebuffers(n: i32, ids: *u32)
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glBindFramebuffer(GLenum, GLuint)")
+pub extern fn glBindFramebuffer(target: u32, id: u32)
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glFramebufferTexture2D(GLenum, GLenum, GLenum, GLuint, GLint)")
+pub extern fn glFramebufferTexture2D(target: u32, attachment: u32, texTarget: u32, tex: u32, level: i32)
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "GLenum glCheckFramebufferStatus(GLenum)")
+pub extern fn glCheckFramebufferStatus(target: u32): u32
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glDeleteFramebuffers(GLsizei, const GLuint *)")
+pub extern fn glDeleteFramebuffers(n: i32, ids: *u32)
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glGenRenderbuffers(GLsizei, GLuint *)")
+pub extern fn glGenRenderbuffers(n: i32, ids: *u32)
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glBindRenderbuffer(GLenum, GLuint)")
+pub extern fn glBindRenderbuffer(target: u32, id: u32)
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glRenderbufferStorage(GLenum, GLenum, GLsizei, GLsizei)")
+pub extern fn glRenderbufferStorage(target: u32, format: u32, w: i32, h: i32)
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glFramebufferRenderbuffer(GLenum, GLenum, GLenum, GLuint)")
+pub extern fn glFramebufferRenderbuffer(target: u32, attachment: u32, rbTarget: u32, rb: u32)
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glDeleteRenderbuffers(GLsizei, const GLuint *)")
+pub extern fn glDeleteRenderbuffers(n: i32, ids: *u32)
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glReadPixels(GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, void *)")
+pub extern fn glReadPixels(x: i32, y: i32, w: i32, h: i32, format: u32, kind: u32, pixels: *u8)
+
+// ── draw ──────────────────────────────────────────────────────────────────────
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glDrawArrays(GLenum, GLint, GLsizei)")
+pub extern fn glDrawArrays(mode: u32, first: i32, count: i32)
+
+// `offset` is a byte offset into the bound element buffer, cast from an integer.
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glDrawElements(GLenum, GLsizei, GLenum, const void *)")
+pub extern fn glDrawElements(mode: u32, count: i32, kind: u32, offset: *u8)
+
+// ── constants ─────────────────────────────────────────────────────────────────
+
+pub let GL_FALSE: u8 = 0
+
+pub let GL_TRUE: u8 = 1
+
+pub let GL_NO_ERROR: u32 = 0
+
+pub let GL_POINTS: u32 = 0x0000
+
+pub let GL_LINES: u32 = 0x0001
+
+pub let GL_TRIANGLES: u32 = 0x0004
+
+pub let GL_TRIANGLE_STRIP: u32 = 0x0005
+
+pub let GL_DEPTH_BUFFER_BIT: u32 = 0x00000100
+
+pub let GL_COLOR_BUFFER_BIT: u32 = 0x00004000
+
+pub let GL_LESS: u32 = 0x0201
+
+pub let GL_LEQUAL: u32 = 0x0203
+
+pub let GL_ALWAYS: u32 = 0x0207
+
+pub let GL_SRC_ALPHA: u32 = 0x0302
+
+pub let GL_ONE_MINUS_SRC_ALPHA: u32 = 0x0303
+
+pub let GL_ZERO: u32 = 0
+
+pub let GL_ONE: u32 = 1
+
+pub let GL_FRONT: u32 = 0x0404
+
+pub let GL_BACK: u32 = 0x0405
+
+pub let GL_CW: u32 = 0x0900
+
+pub let GL_CCW: u32 = 0x0901
+
+pub let GL_CULL_FACE: u32 = 0x0B44
+
+pub let GL_DEPTH_TEST: u32 = 0x0B71
+
+pub let GL_BLEND: u32 = 0x0BE2
+
+pub let GL_SCISSOR_TEST: u32 = 0x0C11
+
+pub let GL_UNPACK_ALIGNMENT: u32 = 0x0CF5
+
+pub let GL_TEXTURE_2D: u32 = 0x0DE1
+
+pub let GL_UNSIGNED_BYTE: u32 = 0x1401
+
+pub let GL_UNSIGNED_INT: u32 = 0x1405
+
+pub let GL_FLOAT: u32 = 0x1406
+
+pub let GL_DEPTH_COMPONENT: u32 = 0x1902
+
+pub let GL_RED: u32 = 0x1903
+
+pub let GL_RGB: u32 = 0x1907
+
+pub let GL_RGBA: u32 = 0x1908
+
+pub let GL_VENDOR: u32 = 0x1F00
+
+pub let GL_RENDERER: u32 = 0x1F01
+
+pub let GL_VERSION: u32 = 0x1F02
+
+pub let GL_NEAREST: u32 = 0x2600
+
+pub let GL_LINEAR: u32 = 0x2601
+
+pub let GL_TEXTURE_MAG_FILTER: u32 = 0x2800
+
+pub let GL_TEXTURE_MIN_FILTER: u32 = 0x2801
+
+pub let GL_TEXTURE_WRAP_S: u32 = 0x2802
+
+pub let GL_TEXTURE_WRAP_T: u32 = 0x2803
+
+pub let GL_REPEAT: u32 = 0x2901
+
+pub let GL_RGBA8: i32 = 0x8058
+
+pub let GL_TEXTURE0: u32 = 0x84C0
+
+pub let GL_CLAMP_TO_EDGE: i32 = 0x812F
+
+pub let GL_DEPTH_COMPONENT24: u32 = 0x81A6
+
+pub let GL_RGBA32F: i32 = 0x8814
+
+pub let GL_RGB32F: i32 = 0x8815
+
+pub let GL_RGBA16F: i32 = 0x881A
+
+pub let GL_RGB16F: i32 = 0x881B
+
+pub let GL_ARRAY_BUFFER: u32 = 0x8892
+
+pub let GL_ELEMENT_ARRAY_BUFFER: u32 = 0x8893
+
+pub let GL_STREAM_DRAW: u32 = 0x88E0
+
+pub let GL_STATIC_DRAW: u32 = 0x88E4
+
+pub let GL_DYNAMIC_DRAW: u32 = 0x88E8
+
+pub let GL_FRAGMENT_SHADER: u32 = 0x8B30
+
+pub let GL_VERTEX_SHADER: u32 = 0x8B31
+
+pub let GL_COMPILE_STATUS: u32 = 0x8B81
+
+pub let GL_LINK_STATUS: u32 = 0x8B82
+
+pub let GL_INFO_LOG_LENGTH: u32 = 0x8B84
+
+pub let GL_FRAMEBUFFER_COMPLETE: u32 = 0x8CD5
+
+pub let GL_COLOR_ATTACHMENT0: u32 = 0x8CE0
+
+pub let GL_DEPTH_ATTACHMENT: u32 = 0x8D00
+
+pub let GL_FRAMEBUFFER: u32 = 0x8D40
+
+pub let GL_RENDERBUFFER: u32 = 0x8D41

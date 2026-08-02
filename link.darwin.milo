@@ -1,0 +1,12 @@
+// gl/link — the one declaration that differs per platform.
+//
+// A darwin framework is not a `-l` name, but `-framework OpenGL` and `-lGL` resolve the
+// same symbols, so splitting the whole binding set would duplicate 300 lines to vary one
+// flag. Only `@link` lives here; `raw.milo` holds every other entry point and carries no
+// link of its own, because one flag on the link line resolves all of them.
+//
+// Both arms MUST declare the same surface — that is the platform-split contract.
+
+@link("framework:OpenGL")
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "GLenum glGetError(void)")
+pub extern fn glGetError(): u32
