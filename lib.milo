@@ -19,6 +19,11 @@
 // teardown — or on a thread with no context — is undefined behaviour rather than
 // a leak. An explicit call puts the ordering where the program can see it.
 //
+// Every handle here is `@noCopy` and `free` consumes it, so giving up Drop does
+// not give up compile-time checking: using a handle after free, or freeing it
+// twice, is a compile error. Without that these types are four integers, the
+// all-fields-Copy rule makes them Copy, and `free` would consume nothing.
+//
 //   var sh = Shader.compile(VERT, FRAG)!
 //   var quad = Mesh.fullscreenQuad()
 //   Gpu.clear(0.0, 0.0, 0.0, 1.0, true)
@@ -50,7 +55,7 @@ from "./raw" import {
     GL_DEPTH_BUFFER_BIT, GL_DEPTH_COMPONENT24, GL_DEPTH_TEST, GL_FALSE,
     GL_FLOAT, GL_FRAGMENT_SHADER, GL_FRAMEBUFFER, GL_FRAMEBUFFER_COMPLETE,
     GL_LEQUAL, GL_LINEAR, GL_LINK_STATUS, GL_NEAREST, GL_ONE,
-    GL_ONE_MINUS_SRC_ALPHA, GL_RENDERBUFFER, GL_RGB, GL_RGB32F, GL_RGBA,
+    GL_ONE_MINUS_SRC_ALPHA, GL_R32F, GL_RED, GL_RENDERBUFFER, GL_RGB, GL_RGB32F, GL_RGBA,
     GL_RGBA16F, GL_RGBA8, GL_SRC_ALPHA, GL_STREAM_DRAW, GL_TEXTURE0,
     GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_TEXTURE_MIN_FILTER,
     GL_TEXTURE_WRAP_S, GL_TEXTURE_WRAP_T, GL_TRIANGLES, GL_TRUE,
@@ -174,6 +179,7 @@ impl Gpu {
 
 // ── shaders ───────────────────────────────────────────────────────────────────
 
+@noCopy
 pub struct Shader {
     id: u32,
 }
@@ -274,7 +280,7 @@ impl Shader {
         }
     }
 
-    fn free(self: &Self) {
+    fn free(self: Self) {
         unsafe {
             glDeleteProgram(self.id)
         }
@@ -330,6 +336,7 @@ fn programLog(prog: u32): string {
 // component count of each attribute in order — [3, 2, 4] is a vec3 at location
 // 0, a vec2 at 1 and a vec4 at 2, packed tightly, which is the layout every
 // shader in this module expects.
+@noCopy
 pub struct Mesh {
     vao: u32,
     vbo: u32,
@@ -414,7 +421,7 @@ impl Mesh {
         return m
     }
 
-    fn free(self: &Self) {
+    fn free(self: Self) {
         unsafe {
             glDeleteBuffers(1, self.vbo.addrOf())
             glDeleteVertexArrays(1, self.vao.addrOf())
@@ -442,6 +449,7 @@ void main() {
 
 // ── textures ──────────────────────────────────────────────────────────────────
 
+@noCopy
 pub struct Texture2D {
     id: u32,
     w: i64,
@@ -476,6 +484,52 @@ impl Texture2D {
             return Texture2D {
                 id: id, w: w, h: h
             }
+        }
+    }
+
+    // One float per pixel. A depth buffer, a mask, a heightfield — anything the
+    // CPU computed per pixel and the shader needs to read back.
+    fn r32f(w: i64, h: i64, pixels: &Vec<f32>, smooth: bool): Texture2D {
+        assert(pixels.len >= w * h, "Texture2D.r32f: pixels is shorter than w*h")
+        unsafe {
+            let id = newTexture(smooth)
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, w as i32, h as i32, 0, GL_RED, GL_FLOAT, pixels.ptr() as *u8)
+            return Texture2D {
+                id: id, w: w, h: h
+            }
+        }
+    }
+
+    // Allocated but not filled — for a texture whose contents arrive later, or
+    // whose useful area is smaller than the allocation.
+    fn r32fEmpty(w: i64, h: i64, smooth: bool): Texture2D {
+        unsafe {
+            let id = newTexture(smooth)
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, w as i32, h as i32, 0, GL_RED, GL_FLOAT, 0 as *u8)
+            return Texture2D {
+                id: id, w: w, h: h
+            }
+        }
+    }
+
+    // Write a w x h block into the bottom-left corner. Lets one fixed allocation
+    // serve inputs of varying size, which beats reallocating a texture mid-frame.
+    fn updateR32fRegion(self: &Self, w: i64, h: i64, pixels: &Vec<f32>) {
+        // Two ways to run off the end here, not one: a short Vec, and a region
+        // larger than the allocation it is being written into.
+        assert(pixels.len >= w * h, "Texture2D.updateR32fRegion: pixels is shorter than w*h")
+        assert(w <= self.w && h <= self.h, "Texture2D.updateR32fRegion: region is larger than the texture")
+        unsafe {
+            glBindTexture(GL_TEXTURE_2D, self.id)
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w as i32, h as i32, GL_RED, GL_FLOAT, pixels.ptr() as *u8)
+        }
+    }
+
+    fn updateR32f(self: &Self, pixels: &Vec<f32>) {
+        assert(pixels.len >= self.w * self.h, "Texture2D.updateR32f: pixels is shorter than the texture")
+        unsafe {
+            glBindTexture(GL_TEXTURE_2D, self.id)
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, self.w as i32, self.h as i32, GL_RED, GL_FLOAT, pixels.ptr() as *u8)
         }
     }
 
@@ -515,7 +569,7 @@ impl Texture2D {
         }
     }
 
-    fn free(self: &Self) {
+    fn free(self: Self) {
         unsafe {
             glDeleteTextures(1, self.id.addrOf())
         }
@@ -547,6 +601,7 @@ fn newTexture(smooth: bool): u32 {
 // ── offscreen targets ─────────────────────────────────────────────────────────
 
 // A framebuffer with one colour texture and, optionally, a depth buffer.
+@noCopy
 pub struct Target {
     fbo: u32,
     depth: u32, // renderbuffer id, 0 when the target has no depth
@@ -608,7 +663,7 @@ impl Target {
         self.tex.bind(unit)
     }
 
-    fn free(self: &Self) {
+    fn free(self: Self) {
         unsafe {
             if self.depth != 0 {
                 glDeleteRenderbuffers(1, self.depth.addrOf())
