@@ -1,14 +1,14 @@
 // A textured, depth-tested, lit cube on the GPU — the smallest complete use of
 // this package there is.
 //
-//   milo build examples/graphics/gpucube.milo -o /tmp/gpucube --release && /tmp/gpucube
+//   milo build examples/gpucube.milo -o /tmp/gpucube --release && /tmp/gpucube
 //
 // Everything else in examples/graphics draws with loops over a buffer. This one
 // hands the triangles to the driver instead: one vertex array, one shader, a
 // depth buffer, and a texture generated at startup. ESC quits.
 //
-// It needs SDL2 for the window and a GL 3.3 core context; the OpenGL link flag
-// is added by the compiler when it sees the `gl*` symbols.
+// It needs SDL2 for the window and a GL 3.3 core context. The OpenGL link flag
+// comes from this package's `@link` arm, not from the compiler.
 
 from "../lib" import {
     Gpu, Mesh, Shader, Texture2D, bindScreen

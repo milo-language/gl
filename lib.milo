@@ -339,6 +339,9 @@ pub struct Mesh {
 
 impl Mesh {
     fn new(attrs: &Vec<i64>): Mesh {
+        // Zero attributes means a zero-float vertex, which makes `upload` divide by
+        // zero to count vertices — a confusing trap two calls away from the mistake.
+        assert(attrs.len > 0, "Mesh.new: needs at least one vertex attribute")
         unsafe {
             var vao: u32 = 0
             var vbo: u32 = 0
@@ -371,6 +374,10 @@ impl Mesh {
     // orphaning idiom: the driver hands back a fresh allocation instead of
     // stalling until the last frame's draw has finished reading the old one.
     fn upload(self: &mut Self, data: &Vec<f32>) {
+        // A partial trailing vertex is silently truncated by the integer divide, so
+        // the draw is short by one triangle with nothing to point at.
+        assert(data.len % self.floatsPerVertex == 0,
+            "Mesh.upload: data length is not a whole number of vertices")
         unsafe {
             glBindBuffer(GL_ARRAY_BUFFER, self.vbo)
             glBufferData(GL_ARRAY_BUFFER, (data.len * 4) as i64, data.ptr() as *u8, GL_STREAM_DRAW)
@@ -446,6 +453,10 @@ impl Texture2D {
     // software renderers here hand to SDL, so a CPU framebuffer uploads with no
     // repacking.
     fn rgba8(w: i64, h: i64, pixels: &Vec<u32>, smooth: bool): Texture2D {
+        // The driver reads w*h words off this pointer with no idea how long the
+        // Vec is. A short one is a heap over-read the caller never wrote an
+        // `unsafe` for, so the width/height claim is checked here or nowhere.
+        assert(pixels.len >= w * h, "Texture2D.rgba8: pixels is shorter than w*h")
         unsafe {
             let id = newTexture(smooth)
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w as i32, h as i32, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.ptr() as *u8)
@@ -458,6 +469,7 @@ impl Texture2D {
     // Three floats per pixel of unbounded linear light. This is the format an
     // HDR canvas is already in, so uploading one is a straight memcpy.
     fn rgb32f(w: i64, h: i64, pixels: &Vec<f32>, smooth: bool): Texture2D {
+        assert(pixels.len >= w * h * 3, "Texture2D.rgb32f: pixels is shorter than w*h*3")
         unsafe {
             let id = newTexture(smooth)
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB32F, w as i32, h as i32, 0, GL_RGB, GL_FLOAT, pixels.ptr() as *u8)
@@ -481,6 +493,7 @@ impl Texture2D {
     }
 
     fn updateRgb32f(self: &Self, pixels: &Vec<f32>) {
+        assert(pixels.len >= self.w * self.h * 3, "Texture2D.updateRgb32f: pixels is shorter than the texture")
         unsafe {
             glBindTexture(GL_TEXTURE_2D, self.id)
             glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, self.w as i32, self.h as i32, GL_RGB, GL_FLOAT, pixels.ptr() as *u8)
@@ -488,6 +501,7 @@ impl Texture2D {
     }
 
     fn updateRgba8(self: &Self, pixels: &Vec<u32>) {
+        assert(pixels.len >= self.w * self.h, "Texture2D.updateRgba8: pixels is shorter than the texture")
         unsafe {
             glBindTexture(GL_TEXTURE_2D, self.id)
             glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, self.w as i32, self.h as i32, GL_RGBA, GL_UNSIGNED_BYTE, pixels.ptr() as *u8)
@@ -559,6 +573,14 @@ impl Target {
             let status = glCheckFramebufferStatus(GL_FRAMEBUFFER)
             glBindFramebuffer(GL_FRAMEBUFFER, 0)
             if status != GL_FRAMEBUFFER_COMPLETE {
+                // Nothing is handed back on this path, so nothing the caller holds
+                // could free these — an Err would otherwise leak a texture, a
+                // renderbuffer and an FBO per attempt.
+                if rb != 0 {
+                    glDeleteRenderbuffers(1, rb.addrOf())
+                }
+                glDeleteFramebuffers(1, fbo.addrOf())
+                tex.free()
                 return Result.Err($"framebuffer incomplete: 0x{status}")
             }
             return Result.Ok(Target {
