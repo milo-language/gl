@@ -14,22 +14,26 @@
 // caps at 4.1 and only in a core profile), and it is old enough that every Mesa
 // and every driver of the last decade has it.
 //
-// GL objects are freed by an explicit `free`, not by Drop. Deleting a GL object
-// needs the context that made it to still be current, and a Drop firing during
-// teardown — or on a thread with no context — is undefined behaviour rather than
-// a leak. An explicit call puts the ordering where the program can see it.
+// A `GlContext` owns every object made through it, and nothing here has a `Drop`.
+// See the comment on GlContext for why: deleting a GL object needs its context
+// current on the right thread, a destructor cannot promise either, and Milo's
+// second-class references mean an object cannot hold its context alive the way a
+// Rust one holds an `Arc`. So the context owns the objects instead, and teardown
+// is one call at a point the program chose.
 //
-// Every handle here is `@noCopy` and `free` consumes it, so giving up Drop does
-// not give up compile-time checking: using a handle after free, or freeing it
-// twice, is a compile error. Without that these types are four integers, the
-// all-fields-Copy rule makes them Copy, and `free` would consume nothing.
+// You can still free an object yourself the moment you are done with it, and
+// should for anything you replace mid-run. `@noCopy` makes using one after that,
+// or freeing it twice, a compile error. What the context adds is the case
+// `@noCopy` cannot see — forgetting.
 //
-//   var sh = Shader.compile(VERT, FRAG)!
-//   var quad = Mesh.fullscreenQuad()
+//   var gl = GlContext.new()
+//   var sh = Shader.compile(gl, VERT, FRAG)!
+//   var quad = Mesh.fullscreenQuad(gl)
 //   Gpu.clear(0.0, 0.0, 0.0, 1.0, true)
 //   sh.bind()
 //   sh.uniformF("time", t)
 //   quad.draw()
+//   gl.free()   // sweeps anything still outstanding
 
 from "./link" import {
     glGetError
@@ -69,6 +73,123 @@ from "./raw" import {
     GL_TEXTURE_MIN_FILTER,
     GL_TEXTURE_WRAP_S, GL_TEXTURE_WRAP_T, GL_TRIANGLES, GL_TRUE,
     GL_UNPACK_ALIGNMENT, GL_UNSIGNED_BYTE, GL_VERSION, GL_VERTEX_SHADER
+}
+
+// ── the context's objects ─────────────────────────────────────────────────────
+
+// Every GL name this context has handed out, so none of them can be leaked and
+// none of them can be deleted at the wrong time.
+//
+// This exists because the usual answer is not expressible here. In Rust every GL
+// object holds an `Arc<Context>`, so the context is provably alive whenever an
+// object drops and `Drop` is safe. Milo's references are second-class — a struct
+// can never store a `&GlContext` — so an object cannot keep its context alive,
+// and a `Drop` on it would be a `glDelete*` at a time nobody chose: possibly
+// after the context is gone, possibly on a thread it was never current on. Both
+// are undefined behaviour rather than a leak.
+//
+// So ownership runs the other way. An object still frees itself when you ask, and
+// `@noCopy` still makes using one after that a compile error. What this adds is
+// the case `@noCopy` cannot see: forgetting entirely. `GlContext.free` deletes
+// whatever is left, once, at a point the caller picked and while the context is
+// still current.
+//
+// One list per kind because GL has one deleter per kind. A freed slot is set to
+// zero rather than removed — `glDelete*` ignores a zero name, so the sweep needs
+// no compaction and an individual free stays O(1).
+@noCopy
+pub struct GlContext {
+    programs: Vec<u32>,
+    buffers: Vec<u32>,
+    vaos: Vec<u32>,
+    textures: Vec<u32>,
+    fbos: Vec<u32>,
+    rbos: Vec<u32>,
+}
+
+impl GlContext {
+    // Call once, after the window system has made a context current.
+    fn new(): GlContext {
+        return GlContext {
+            programs: Vec.new(),
+            buffers: Vec.new(),
+            vaos: Vec.new(),
+            textures: Vec.new(),
+            fbos: Vec.new(),
+            rbos: Vec.new(),
+        }
+    }
+
+    // How many objects this context is still holding, by kind. A number that is
+    // not zero at the end of a frame loop is a leak you can see.
+    fn live(self: &Self): i64 {
+        return liveIn(self.programs) + liveIn(self.buffers) + liveIn(self.vaos)
+            + liveIn(self.textures) + liveIn(self.fbos) + liveIn(self.rbos)
+    }
+
+    // Delete everything still outstanding. Safe to call with nothing left, which
+    // is the case a program that freed everything by hand will be in.
+    fn free(self: Self) {
+        unsafe {
+            for id in self.programs {
+                if id != 0 {
+                    glDeleteProgram(id)
+                }
+            }
+            for id in self.buffers {
+                if id != 0 {
+                    var n = id
+                    glDeleteBuffers(1, n.addrOf())
+                }
+            }
+            for id in self.vaos {
+                if id != 0 {
+                    var n = id
+                    glDeleteVertexArrays(1, n.addrOf())
+                }
+            }
+            for id in self.textures {
+                if id != 0 {
+                    var n = id
+                    glDeleteTextures(1, n.addrOf())
+                }
+            }
+            for id in self.fbos {
+                if id != 0 {
+                    var n = id
+                    glDeleteFramebuffers(1, n.addrOf())
+                }
+            }
+            for id in self.rbos {
+                if id != 0 {
+                    var n = id
+                    glDeleteRenderbuffers(1, n.addrOf())
+                }
+            }
+        }
+    }
+}
+
+fn liveIn(v: &Vec<u32>): i64 {
+    var n = 0
+    for id in v {
+        if id != 0 {
+            n = n + 1
+        }
+    }
+    return n
+}
+
+// Zero a name that has just been deleted by hand, so the sweep does not delete it
+// a second time. Linear, and deliberately: a context holds tens of objects, not
+// thousands, and a map would cost more than the scan it replaced.
+fn forget(v: &mut Vec<u32>, id: u32) {
+    for i in 0..v.len {
+        if v[i] == id {
+            v[i] = 0
+            return
+        }
+    }
 }
 
 // ── device ────────────────────────────────────────────────────────────────────
@@ -235,7 +356,7 @@ pub struct Shader {
 impl Shader {
     // Compile and link a vertex/fragment pair. The error is the driver's own log,
     // which names the line — there is nothing this module could add to it.
-    fn compile(vert: &string, frag: &string): Result<Shader, string> {
+    fn compile(gl: &mut GlContext, vert: &string, frag: &string): Result<Shader, string> {
         unsafe {
             let vs = compileStage(GL_VERTEX_SHADER, vert)?
             let fs = compileStage(GL_FRAGMENT_SHADER, frag)?
@@ -254,6 +375,7 @@ impl Shader {
                 glDeleteProgram(prog)
                 return Result.Err("link failed: " + log)
             }
+            gl.programs.push(prog)
             return Result.Ok(Shader {
                 id: prog
             }
@@ -328,10 +450,14 @@ impl Shader {
         }
     }
 
-    fn free(self: Self) {
+    // Deleting early is fine and often right — a shader you are replacing should
+    // not wait for teardown. Handing the context back the name is what keeps the
+    // final sweep from deleting it a second time.
+    fn free(self: Self, gl: &mut GlContext) {
         unsafe {
             glDeleteProgram(self.id)
         }
+        forget(gl.programs, self.id)
     }
 }
 
@@ -393,7 +519,7 @@ pub struct Mesh {
 }
 
 impl Mesh {
-    fn new(attrs: &Vec<i64>): Mesh {
+    fn new(gl: &mut GlContext, attrs: &Vec<i64>): Mesh {
         // Zero attributes means a zero-float vertex, which makes `upload` divide by
         // zero to count vertices — a confusing trap two calls away from the mistake.
         assert(attrs.len > 0, "Mesh.new: needs at least one vertex attribute")
@@ -419,6 +545,8 @@ impl Mesh {
                 i = i + 1
             }
             glBindVertexArray(0)
+            gl.vaos.push(vao)
+            gl.buffers.push(vbo)
             return Mesh {
                 vao: vao, vbo: vbo, floatsPerVertex: total, vertices: 0
             }
@@ -452,11 +580,11 @@ impl Mesh {
 
     // Two triangles covering clip space, with UVs — the input to every
     // post-processing pass. Position is vec2 at location 0, UV vec2 at 1.
-    fn fullscreenQuad(): Mesh {
+    fn fullscreenQuad(gl: &mut GlContext): Mesh {
         var attrs: Vec<i64> = Vec.new()
         attrs.push(2)
         attrs.push(2)
-        var m = Mesh.new(attrs)
+        var m = Mesh.new(gl, attrs)
         var v: Vec<f32> = Vec.new()
         pushQuadVertex(v, -1.0, -1.0, 0.0, 0.0)
         pushQuadVertex(v, 1.0, -1.0, 1.0, 0.0)
@@ -468,11 +596,13 @@ impl Mesh {
         return m
     }
 
-    fn free(self: Self) {
+    fn free(self: Self, gl: &mut GlContext) {
         unsafe {
             glDeleteBuffers(1, self.vbo.addrOf())
             glDeleteVertexArrays(1, self.vao.addrOf())
         }
+        forget(gl.buffers, self.vbo)
+        forget(gl.vaos, self.vao)
     }
 }
 
@@ -533,10 +663,10 @@ impl Texture2D {
     // of two sRGB values is not the sRGB of their linear average, so edges come
     // out darker than they should. Passing bytes through a 256-entry lookup table
     // per fetch has the same flaw and costs a dependent read.
-    fn srgb8(w: i64, h: i64, pixels: &Vec<u8>, smooth: bool): Texture2D {
+    fn srgb8(gl: &mut GlContext, w: i64, h: i64, pixels: &Vec<u8>, smooth: bool): Texture2D {
         assert(pixels.len >= w * h * 3, "Texture2D.srgb8: pixels is shorter than w*h*3")
         unsafe {
-            let id = newTexture(smooth)
+            let id = newTexture(gl, smooth)
             glTexImage2D(GL_TEXTURE_2D, 0, GL_SRGB8, w as i32, h as i32, 0, GL_RGB, GL_UNSIGNED_BYTE, pixels.ptr() as *u8)
             return Texture2D {
                 id: id, w: w, h: h
@@ -547,13 +677,13 @@ impl Texture2D {
     // An 8-bit RGBA texture from packed ABGR8888 words — the same layout the
     // software renderers here hand to SDL, so a CPU framebuffer uploads with no
     // repacking.
-    fn rgba8(w: i64, h: i64, pixels: &Vec<u32>, smooth: bool): Texture2D {
+    fn rgba8(gl: &mut GlContext, w: i64, h: i64, pixels: &Vec<u32>, smooth: bool): Texture2D {
         // The driver reads w*h words off this pointer with no idea how long the
         // Vec is. A short one is a heap over-read the caller never wrote an
         // `unsafe` for, so the width/height claim is checked here or nowhere.
         assert(pixels.len >= w * h, "Texture2D.rgba8: pixels is shorter than w*h")
         unsafe {
-            let id = newTexture(smooth)
+            let id = newTexture(gl, smooth)
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w as i32, h as i32, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.ptr() as *u8)
             return Texture2D {
                 id: id, w: w, h: h
@@ -563,10 +693,10 @@ impl Texture2D {
 
     // Three floats per pixel of unbounded linear light. This is the format an
     // HDR canvas is already in, so uploading one is a straight memcpy.
-    fn rgb32f(w: i64, h: i64, pixels: &Vec<f32>, smooth: bool): Texture2D {
+    fn rgb32f(gl: &mut GlContext, w: i64, h: i64, pixels: &Vec<f32>, smooth: bool): Texture2D {
         assert(pixels.len >= w * h * 3, "Texture2D.rgb32f: pixels is shorter than w*h*3")
         unsafe {
-            let id = newTexture(smooth)
+            let id = newTexture(gl, smooth)
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB32F, w as i32, h as i32, 0, GL_RGB, GL_FLOAT, pixels.ptr() as *u8)
             return Texture2D {
                 id: id, w: w, h: h
@@ -576,10 +706,10 @@ impl Texture2D {
 
     // One float per pixel. A depth buffer, a mask, a heightfield — anything the
     // CPU computed per pixel and the shader needs to read back.
-    fn r32f(w: i64, h: i64, pixels: &Vec<f32>, smooth: bool): Texture2D {
+    fn r32f(gl: &mut GlContext, w: i64, h: i64, pixels: &Vec<f32>, smooth: bool): Texture2D {
         assert(pixels.len >= w * h, "Texture2D.r32f: pixels is shorter than w*h")
         unsafe {
-            let id = newTexture(smooth)
+            let id = newTexture(gl, smooth)
             glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, w as i32, h as i32, 0, GL_RED, GL_FLOAT, pixels.ptr() as *u8)
             return Texture2D {
                 id: id, w: w, h: h
@@ -589,9 +719,9 @@ impl Texture2D {
 
     // Allocated but not filled — for a texture whose contents arrive later, or
     // whose useful area is smaller than the allocation.
-    fn r32fEmpty(w: i64, h: i64, smooth: bool): Texture2D {
+    fn r32fEmpty(gl: &mut GlContext, w: i64, h: i64, smooth: bool): Texture2D {
         unsafe {
-            let id = newTexture(smooth)
+            let id = newTexture(gl, smooth)
             glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, w as i32, h as i32, 0, GL_RED, GL_FLOAT, 0 as *u8)
             return Texture2D {
                 id: id, w: w, h: h
@@ -623,9 +753,9 @@ impl Texture2D {
     // An empty half-float target, for a framebuffer to render into. Half is
     // enough for light that has already been exposed, and halves the bandwidth
     // of every blur tap against RGBA32F.
-    fn rgba16f(w: i64, h: i64, smooth: bool): Texture2D {
+    fn rgba16f(gl: &mut GlContext, w: i64, h: i64, smooth: bool): Texture2D {
         unsafe {
-            let id = newTexture(smooth)
+            let id = newTexture(gl, smooth)
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, w as i32, h as i32, 0, GL_RGBA, GL_FLOAT, 0 as *u8)
             return Texture2D {
                 id: id, w: w, h: h
@@ -726,17 +856,19 @@ impl Texture2D {
         }
     }
 
-    fn free(self: Self) {
+    fn free(self: Self, gl: &mut GlContext) {
         unsafe {
             glDeleteTextures(1, self.id.addrOf())
         }
+        forget(gl.textures, self.id)
     }
 }
 
-fn newTexture(smooth: bool): u32 {
+fn newTexture(gl: &mut GlContext, smooth: bool): u32 {
     unsafe {
         var id: u32 = 0
         glGenTextures(1, id.addrOf())
+        gl.textures.push(id)
         glBindTexture(GL_TEXTURE_2D, id)
         // Rows of a float canvas are 3 floats per pixel and so never 4-byte
         // aligned at an odd width; the default alignment of 4 shears the image.
@@ -768,16 +900,18 @@ pub struct Target {
 }
 
 impl Target {
-    fn new(w: i64, h: i64, depth: bool, smooth: bool): Result<Target, string> {
+    fn new(gl: &mut GlContext, w: i64, h: i64, depth: bool, smooth: bool): Result<Target, string> {
         unsafe {
-            let tex = Texture2D.rgba16f(w, h, smooth)
+            let tex = Texture2D.rgba16f(gl, w, h, smooth)
             var fbo: u32 = 0
             glGenFramebuffers(1, fbo.addrOf())
+            gl.fbos.push(fbo)
             glBindFramebuffer(GL_FRAMEBUFFER, fbo)
             glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex.id, 0)
             var rb: u32 = 0
             if depth {
                 glGenRenderbuffers(1, rb.addrOf())
+                gl.rbos.push(rb)
                 glBindRenderbuffer(GL_RENDERBUFFER, rb)
                 glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, w as i32, h as i32)
                 glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, rb)
@@ -789,10 +923,14 @@ impl Target {
                 // could free these — an Err would otherwise leak a texture, a
                 // renderbuffer and an FBO per attempt.
                 if rb != 0 {
-                    glDeleteRenderbuffers(1, rb.addrOf())
+                    var d = rb
+                    glDeleteRenderbuffers(1, d.addrOf())
+                    forget(gl.rbos, rb)
                 }
-                glDeleteFramebuffers(1, fbo.addrOf())
-                tex.free()
+                var f2 = fbo
+                glDeleteFramebuffers(1, f2.addrOf())
+                forget(gl.fbos, fbo)
+                tex.free(gl)
                 return Result.Err($"framebuffer incomplete: 0x{status}")
             }
             return Result.Ok(Target {
@@ -820,14 +958,16 @@ impl Target {
         self.tex.bind(unit)
     }
 
-    fn free(self: Self) {
+    fn free(self: Self, gl: &mut GlContext) {
         unsafe {
             if self.depth != 0 {
                 glDeleteRenderbuffers(1, self.depth.addrOf())
+                forget(gl.rbos, self.depth)
             }
             glDeleteFramebuffers(1, self.fbo.addrOf())
         }
-        self.tex.free()
+        forget(gl.fbos, self.fbo)
+        self.tex.free(gl)
     }
 }
 

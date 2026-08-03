@@ -12,7 +12,7 @@
 // package's `@link` arm, not from the compiler.
 
 from "../lib" import {
-    Gpu, Mesh, Shader, Texture2D, bindScreen
+    GlContext, Gpu, Mesh, Shader, Texture2D, bindScreen
 }
 from "std/math" import {
     Math
@@ -232,7 +232,10 @@ pub fn main(): i32 {
     }
     print("OpenGL " + Gpu.version())
 
-    var sh = match Shader.compile(VERT, FRAG) {
+    // The context owns every object made through it, so teardown is one call
+    // and cannot happen after the GL context is gone.
+    var gl = GlContext.new()
+    var sh = match Shader.compile(gl, VERT, FRAG) {
         Result.Ok(s) => s
         Result.Err(e) => {
             print(e)
@@ -243,9 +246,9 @@ pub fn main(): i32 {
     attrs.push(3) // position
     attrs.push(2) // uv
     attrs.push(3) // normal
-    var cube = Mesh.new(attrs)
+    var cube = Mesh.new(gl, attrs)
     cube.upload(cubeVertices())
-    let tex = Texture2D.rgba8(TEX_SIZE, TEX_SIZE, checkerTexture(), false)
+    let tex = Texture2D.rgba8(gl, TEX_SIZE, TEX_SIZE, checkerTexture(), false)
 
     Gpu.depthTest(true)
     Gpu.cullBackFaces(true)
@@ -292,9 +295,10 @@ pub fn main(): i32 {
         SDL_GL_SwapWindow(win)
     }
 
-    cube.free()
-    tex.free()
-    sh.free()
+    cube.free(gl)
+    tex.free(gl)
+    sh.free(gl)
+    gl.free()
     SDL_GL_DeleteContext(ctx)
     SDL_DestroyWindow(win)
     SDL_Quit()

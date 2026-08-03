@@ -10,7 +10,7 @@
 // function says it should be. A GL_RGB8 texture would come back as the byte it went in
 // as, which is the failure this catches.
 from "../lib" import {
-    Gpu, Mesh, Shader, Target, Texture2D, Wrap, readPixelsRgba8
+    GlContext, Gpu, Mesh, Shader, Target, Texture2D, Wrap, readPixelsRgba8
 }
 from "sdl" import {
     SDL_CreateWindow, SDL_DestroyWindow, SDL_GetError, SDL_Init, SDL_Quit,
@@ -62,7 +62,16 @@ fn main(): i32 {
             return 1
         }
 
-        let code = run()
+        var gl = GlContext.new()
+        let code = run(gl)
+        // Nothing should be outstanding: the test frees everything by hand, and
+        // this is what proves it rather than assuming it.
+        if gl.live() != 0 {
+            print($"leaked {gl.live()} gl objects")
+            gl.free()
+            return 1
+        }
+        gl.free()
 
         SDL_GL_DeleteContext(ctx)
         SDL_DestroyWindow(win)
@@ -71,17 +80,17 @@ fn main(): i32 {
     }
 }
 
-fn run(): i32 {
+fn run(gl: &mut GlContext): i32 {
     // Big enough that the mip chain has more than one level to build.
     let n = 8
     var bytes: Vec<u8> = Vec.filled(n * n * 3, SRGB_BYTE as u8)
-    let tex = Texture2D.srgb8(n, n, bytes, true)
+    let tex = Texture2D.srgb8(gl, n, n, bytes, true)
     tex.setWrap(Wrap.Repeat)
     tex.generateMipmaps()
     tex.setAnisotropy(16.0)
     if Gpu.error() != 0 {
         print("gl error after building the texture")
-        tex.free()
+        tex.free(gl)
         return 1
     }
 
@@ -90,7 +99,7 @@ fn run(): i32 {
     tex.setWrap(Wrap.Mirror)
     tex.setWrap(Wrap.Clamp)
 
-    var shader = Shader.compile("#version 330 core
+    var shader = Shader.compile(gl, "#version 330 core
 layout (location = 0) in vec2 aPos;
 layout (location = 1) in vec2 aUv;
 out vec2 vUv;
@@ -101,20 +110,20 @@ void main() {
 ", SAMPLE_FRAG)
     match shader {
         Result.Ok(sh) => {
-            let target = Target.new(4, 4, false, false)
+            let target = Target.new(gl, 4, 4, false, false)
             match target {
                 Result.Ok(t) => {
                     t.bind()
                     Gpu.clear(0.0, 0.0, 0.0, 1.0, false)
                     sh.bind()
                     sh.sampler("uTex", tex, 0)
-                    let quad = Mesh.fullscreenQuad()
+                    let quad = Mesh.fullscreenQuad(gl)
                     quad.draw()
                     let px = readPixelsRgba8(4, 4)
-                    quad.free()
-                    t.free()
-                    sh.free()
-                    tex.free()
+                    quad.free(gl)
+                    t.free(gl)
+                    sh.free(gl)
+                    tex.free(gl)
 
                     let red = (px[0] & 0xFF) as i64
                     var off = red - WANT_LINEAR_BYTE
@@ -132,15 +141,15 @@ void main() {
                 }
                 Result.Err(e) => {
                     print("target: " + e)
-                    sh.free()
-                    tex.free()
+                    sh.free(gl)
+                    tex.free(gl)
                     return 1
                 }
             }
         }
         Result.Err(e) => {
             print("shader: " + e)
-            tex.free()
+            tex.free(gl)
             return 1
         }
     }

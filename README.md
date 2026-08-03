@@ -5,7 +5,7 @@ layer over them. No dependencies beyond the standard library.
 
 ```bash
 milo add github.com/milo-language/milo-gl            # latest release
-milo add github.com/milo-language/milo-gl@v0.1.3     # or pin a specific tag
+milo add github.com/milo-language/milo-gl@v0.2.0     # or pin a specific tag
 ```
 
 ```milo
@@ -22,22 +22,48 @@ quad.draw()
 `gl` owns the shader, buffer, texture and framebuffer lifecycles and keeps the raw
 pointers out of your program. Drop to `gl/raw` for an entry point it does not wrap.
 
-## Handles are move-tracked
+## The context owns its objects
 
-Every handle here is `@noCopy`, and `free` consumes it. Using one after it is freed, or
-freeing it twice, is a **compile error** rather than a driver-level mystery:
+Nothing here has a `Drop`, and that is not the usual Milo answer — `Vec` and `string`
+free themselves, and no other package makes you call anything.
+
+GL is the exception because `glDelete*` requires the context that made the object to
+still be current, on the thread it was made on. A destructor is exactly the thing whose
+timing you do not control. Rust libraries solve this by giving every GL object an
+`Arc<Context>`, so the context is provably alive whenever an object drops. **Milo cannot
+express that**: references are second-class, so a struct can never store a
+`&GlContext`, and an object therefore cannot keep its context alive.
+
+So ownership runs the other way. A `GlContext` records every name it hands out and
+deletes whatever is left, once, where you put the call:
 
 ```milo
-let t = Texture2D.rgba8(w, h, pixels, false)
-t.free()
+var gl = GlContext.new()                              // after the window system's context
+var tex = Texture2D.rgba8(gl, w, h, pixels, false)
+var sh  = Shader.compile(gl, VERT, FRAG)!
+// ... draw ...
+gl.free()                                             // sweeps anything still outstanding
+```
+
+You can still free an object the moment you are done, and should for anything replaced
+mid-run — a texture swapped every time the scene changes should not wait for teardown.
+`free` takes the context so the name can be handed back:
+
+```milo
+let t = Texture2D.rgba8(gl, w, h, pixels, false)
+t.free(gl)
 t.bind(0)   // error: use of moved variable 't'
 ```
 
-These types are integers, so without `@noCopy` the all-fields-Copy rule would make them
-Copy and `free` would consume nothing. They deliberately have no `Drop`: deleting a GL
-object needs the context that made it to still be current, so a destructor firing during
-teardown is undefined behaviour rather than a leak. Forgetting `free` leaks; the two
-errors worth catching are caught.
+`@noCopy` is what makes that a **compile error** rather than a driver-level mystery, and
+it is why these types are not `Copy` — they are integers, and the all-fields-Copy rule
+would otherwise make `free` consume nothing.
+
+The two checks cover different failures and neither subsumes the other. `@noCopy` catches
+use-after-free and double-free, which the context cannot see. The context catches
+forgetting, which `@noCopy` cannot see. `GlContext.live()` reports how many objects are
+outstanding, so a leak in a frame loop is a number you can assert on rather than a slow
+climb in a memory graph.
 
 Uploads are bounds-checked too — the driver reads `w * h` elements off a pointer with no
 idea how long your `Vec` is, so a short one would be a heap over-read from a call with no
