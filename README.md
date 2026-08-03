@@ -5,7 +5,7 @@ layer over them. No dependencies beyond the standard library.
 
 ```bash
 milo add github.com/milo-language/gl            # latest release
-milo add github.com/milo-language/gl@v0.1.1     # or pin a specific tag
+milo add github.com/milo-language/gl@v0.1.2     # or pin a specific tag
 ```
 
 ```milo

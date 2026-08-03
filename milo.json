@@ -1,6 +1,6 @@
 {
   "name": "gl",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "OpenGL 3.3 core bindings and a safe layer over them",
   "license": "MIT",
   "repository": "github.com/milo-language/gl",

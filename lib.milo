@@ -206,6 +206,23 @@ impl Gpu {
             glBlendFunc(GL_ONE, GL_ONE)
         }
     }
+
+    // `src.rgb + dst.rgb * (1 - src.a)` — alpha as coverage, colour already
+    // scaled by it.
+    //
+    // This is what a compositing layer wants and `blendAlpha` is not. With
+    // straight alpha a layer can only replace what is under it in proportion to
+    // how opaque it is, so a purely additive mark (a glow, a spark, a HUD stroke)
+    // has to claim opacity it does not have in order to be visible at all, and
+    // then it hides the frame behind it. Premultiplied separates the two: rgb is
+    // the light this layer emits, alpha is how much of the layer beneath it
+    // blocks, and either can be zero.
+    fn blendPremultiplied() {
+        unsafe {
+            glEnable(GL_BLEND)
+            glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
+        }
+    }
 }
 
 // ── shaders ───────────────────────────────────────────────────────────────────
