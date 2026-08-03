@@ -22,6 +22,27 @@ quad.draw()
 `gl` owns the shader, buffer, texture and framebuffer lifecycles and keeps the raw
 pointers out of your program. Drop to `gl/raw` for an entry point it does not wrap.
 
+## Handles are move-tracked
+
+Every handle here is `@noCopy`, and `free` consumes it. Using one after it is freed, or
+freeing it twice, is a **compile error** rather than a driver-level mystery:
+
+```milo
+let t = Texture2D.rgba8(w, h, pixels, false)
+t.free()
+t.bind(0)   // error: use of moved variable 't'
+```
+
+These types are integers, so without `@noCopy` the all-fields-Copy rule would make them
+Copy and `free` would consume nothing. They deliberately have no `Drop`: deleting a GL
+object needs the context that made it to still be current, so a destructor firing during
+teardown is undefined behaviour rather than a leak. Forgetting `free` leaks; the two
+errors worth catching are caught.
+
+Uploads are bounds-checked too — the driver reads `w * h` elements off a pointer with no
+idea how long your `Vec` is, so a short one would be a heap over-read from a call with no
+`unsafe` at the call site.
+
 ## darwin and linux only
 
 `milo.json` declares `"targets": ["darwin", "linux"]`, and the compiler enforces it —
