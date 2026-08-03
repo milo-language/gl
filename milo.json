@@ -1,9 +1,9 @@
 {
   "name": "gl",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "OpenGL 3.3 core bindings and a safe layer over them",
   "license": "MIT",
-  "repository": "github.com/milo-language/gl",
+  "repository": "github.com/milo-language/milo-gl",
   "lib": "lib.milo",
   "targets": ["darwin", "linux"],
   "exclude": ["tests/**", "examples/**"]
