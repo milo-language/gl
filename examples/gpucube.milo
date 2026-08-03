@@ -7,8 +7,9 @@
 // hands the triangles to the driver instead: one vertex array, one shader, a
 // depth buffer, and a texture generated at startup. ESC quits.
 //
-// It needs SDL2 for the window and a GL 3.3 core context. The OpenGL link flag
-// comes from this package's `@link` arm, not from the compiler.
+// It needs a GL 3.3 core context, which SDL2 supplies — the `sdl` package holds those
+// bindings, so this file does not restate them. The OpenGL link flag comes from this
+// package's `@link` arm, not from the compiler.
 
 from "../lib" import {
     Gpu, Mesh, Shader, Texture2D, bindScreen
@@ -16,57 +17,21 @@ from "../lib" import {
 from "std/math" import {
     Math
 }
-
-@link("SDL2")
-pub extern fn SDL_Init(flags: u32): i32
-
-pub extern fn SDL_CreateWindow(title: *u8, x: i32, y: i32, w: i32, h: i32, flags: u32): *u8
-
-pub extern fn SDL_GL_SetAttribute(attr: i32, value: i32): i32
-
-pub extern fn SDL_GL_CreateContext(win: *u8): *u8
-
-pub extern fn SDL_GL_DeleteContext(ctx: *u8)
-
-pub extern fn SDL_GL_SwapWindow(win: *u8)
-
-pub extern fn SDL_GL_SetSwapInterval(interval: i32): i32
-
-pub extern fn SDL_GL_GetDrawableSize(win: *u8, w: *i32, h: *i32)
-
-pub extern fn SDL_PollEvent(event: *u8): i32
-
-pub extern fn SDL_GetKeyboardState(numkeys: *i32): *u8
-
-pub extern fn SDL_GetTicks(): u32
-
-pub extern fn SDL_GetError(): *u8
-
-pub extern fn SDL_DestroyWindow(win: *u8)
-
-pub extern fn SDL_Quit()
-
-pub let SDL_INIT_VIDEO: u32 = 0x20
-
-pub let SDL_WINDOWPOS_CENTERED: i32 = 0x2FFF0000
-
-pub let SDL_WINDOW_SHOWN: u32 = 0x4
-
-pub let SDL_WINDOW_OPENGL: u32 = 0x2
-
-pub let SDL_WINDOW_RESIZABLE: u32 = 0x20
-
-pub let SDL_QUIT: u32 = 0x100
-
-pub let SDL_GL_CONTEXT_MAJOR_VERSION: i32 = 17
-
-pub let SDL_GL_CONTEXT_MINOR_VERSION: i32 = 18
-
-pub let SDL_GL_CONTEXT_PROFILE_MASK: i32 = 21
-
-pub let SDL_GL_CONTEXT_PROFILE_CORE: i32 = 1
-
-pub let SC_ESC: i64 = 41
+from "sdl" import {
+    SDL_CreateWindow, SDL_DestroyWindow, SDL_GetError, SDL_GetKeyboardState,
+    SDL_GetTicks, SDL_Init, SDL_PollEvent, SDL_Quit,
+    SDL_INIT_VIDEO, SDL_QUIT, SDL_WINDOWPOS_CENTERED, SDL_WINDOW_RESIZABLE,
+    SDL_WINDOW_SHOWN
+}
+from "sdl/gl" import {
+    SDL_GL_CreateContext, SDL_GL_DeleteContext, SDL_GL_GetDrawableSize,
+    SDL_GL_SetAttribute, SDL_GL_SetSwapInterval, SDL_GL_SwapWindow,
+    SDL_GL_CONTEXT_MAJOR_VERSION, SDL_GL_CONTEXT_MINOR_VERSION,
+    SDL_GL_CONTEXT_PROFILE_CORE, SDL_GL_CONTEXT_PROFILE_MASK, SDL_WINDOW_OPENGL
+}
+from "sdl/keys" import {
+    SC_ESCAPE
+}
 
 pub let W: i64 = 960
 
@@ -298,7 +263,7 @@ pub fn main(): i32 {
                 }
             }
             let keys = SDL_GetKeyboardState(0 as *i32)
-            if keys[SC_ESC] != 0 {
+            if keys[SC_ESCAPE] != 0 {
                 quit = true
             }
         }

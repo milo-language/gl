@@ -1,9 +1,9 @@
 // gl/raw — raw OpenGL 3.3 core bindings.
 //
 // This is the unsafe floor: one `extern fn` per GL entry point, one `let` per
-// constant, and nothing else. Use `std/gpu` unless you need a call this does not
-// wrap — `gl` owns the shader/buffer/texture/framebuffer lifecycles and keeps the
-// raw pointers out of your program.
+// constant, and nothing else. Import `gl` itself unless you need a call this does
+// not wrap — the safe layer owns the shader/buffer/texture/framebuffer lifecycles
+// and keeps the raw pointers out of your program.
 //
 // The link flag comes from `link.darwin.milo` / `link.linux.milo`, the one pair of
 // files that differs per platform: `-framework OpenGL` on darwin, `-lGL` elsewhere.
@@ -72,11 +72,21 @@ pub extern fn glPixelStorei(pname: u32, param: i32)
 @cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glFinish(void)")
 pub extern fn glFinish()
 
-
 // Returns a static NUL-terminated string owned by the driver — read it with
 // std/cstr, never free it.
 @cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "const GLubyte *glGetString(GLenum)")
 pub extern fn glGetString(name: u32): *u8
+
+// Indexed form, for the enums that are arrays — GL_EXTENSIONS is one string per index
+// in a core profile, not one space-separated string as it was before 3.0.
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "const GLubyte *glGetStringi(GLenum, GLuint)")
+pub extern fn glGetStringi(name: u32, index: u32): *u8
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glGetIntegerv(GLenum, GLint *)")
+pub extern fn glGetIntegerv(name: u32, out: *i32)
+
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glGetFloatv(GLenum, GLfloat *)")
+pub extern fn glGetFloatv(name: u32, out: *f32)
 
 // ── shaders ───────────────────────────────────────────────────────────────────
 
@@ -205,6 +215,11 @@ pub extern fn glTexSubImage2D(target: u32, level: i32, x: i32, y: i32, w: i32, h
 @cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glTexParameteri(GLenum, GLenum, GLint)")
 pub extern fn glTexParameteri(target: u32, pname: u32, param: i32)
 
+// Only anisotropic filtering needs the float form; every other texture parameter is an
+// enum or an integer.
+@cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glTexParameterf(GLenum, GLenum, GLfloat)")
+pub extern fn glTexParameterf(target: u32, pname: u32, param: f32)
+
 @cSig("OpenGL/gl3.h|GL_GLEXT_PROTOTYPES+GL/glcorearb.h", "void glGenerateMipmap(GLenum)")
 pub extern fn glGenerateMipmap(target: u32)
 
@@ -329,6 +344,8 @@ pub let GL_RENDERER: u32 = 0x1F01
 
 pub let GL_VERSION: u32 = 0x1F02
 
+pub let GL_EXTENSIONS: u32 = 0x1F03
+
 pub let GL_NEAREST: u32 = 0x2600
 
 pub let GL_LINEAR: u32 = 0x2601
@@ -341,7 +358,29 @@ pub let GL_TEXTURE_WRAP_S: u32 = 0x2802
 
 pub let GL_TEXTURE_WRAP_T: u32 = 0x2803
 
+pub let GL_NEAREST_MIPMAP_NEAREST: u32 = 0x2700
+
+pub let GL_LINEAR_MIPMAP_NEAREST: u32 = 0x2701
+
+pub let GL_LINEAR_MIPMAP_LINEAR: u32 = 0x2703
+
 pub let GL_REPEAT: u32 = 0x2901
+
+pub let GL_MIRRORED_REPEAT: i32 = 0x8370
+
+// GL_EXT_texture_filter_anisotropic. Not core in 3.3 (it became core in 4.6), but
+// present on essentially every desktop driver — query the extension before using it.
+pub let GL_TEXTURE_MAX_ANISOTROPY_EXT: u32 = 0x84FE
+
+pub let GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT: u32 = 0x84FF
+
+pub let GL_NUM_EXTENSIONS: u32 = 0x821D
+
+// sRGB internal formats. Sampling one of these decodes to linear in hardware, which is
+// both exact and free — the alternative is a 256-entry lookup table per fetch.
+pub let GL_SRGB8: i32 = 0x8C41
+
+pub let GL_SRGB8_ALPHA8: i32 = 0x8C43
 
 pub let GL_RGBA8: i32 = 0x8058
 

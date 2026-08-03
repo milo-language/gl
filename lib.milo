@@ -31,7 +31,9 @@
 //   sh.uniformF("time", t)
 //   quad.draw()
 
-from "./link" import { glGetError }
+from "./link" import {
+    glGetError
+}
 
 from "./raw" import {
     glActiveTexture, glAttachShader, glBindBuffer, glBindFramebuffer,
@@ -43,21 +45,28 @@ from "./raw" import {
     glDepthMask, glDisable, glDrawArrays, glEnable, glEnableVertexAttribArray,
     glFramebufferRenderbuffer, glFramebufferTexture2D, glGenBuffers,
     glGenFramebuffers, glGenRenderbuffers, glGenTextures, glGenVertexArrays,
-    glFinish, glGetProgramInfoLog, glGetProgramiv, glGetShaderInfoLog,
-    glGetShaderiv, glGetString, glGetUniformLocation, glLinkProgram,
+    glFinish, glGenerateMipmap, glGetFloatv, glGetIntegerv,
+    glGetProgramInfoLog, glGetProgramiv, glGetShaderInfoLog,
+    glGetShaderiv, glGetString, glGetStringi, glGetUniformLocation, glLinkProgram,
     glPixelStorei, glReadPixels, glRenderbufferStorage, glShaderSource,
-    glTexImage2D, glTexParameteri,
+    glTexImage2D, glTexParameterf, glTexParameteri,
     glTexSubImage2D, glUniform1f, glUniform1i, glUniform2f, glUniform3f,
     glUniform4f, glUniformMatrix4fv, glUseProgram, glVertexAttribPointer,
     glViewport,
     GL_ARRAY_BUFFER, GL_BACK, GL_BLEND, GL_CLAMP_TO_EDGE, GL_COLOR_ATTACHMENT0,
     GL_COLOR_BUFFER_BIT, GL_COMPILE_STATUS, GL_CULL_FACE, GL_DEPTH_ATTACHMENT,
-    GL_DEPTH_BUFFER_BIT, GL_DEPTH_COMPONENT24, GL_DEPTH_TEST, GL_FALSE,
+    GL_DEPTH_BUFFER_BIT, GL_DEPTH_COMPONENT24, GL_DEPTH_TEST, GL_EXTENSIONS,
+    GL_FALSE,
     GL_FLOAT, GL_FRAGMENT_SHADER, GL_FRAMEBUFFER, GL_FRAMEBUFFER_COMPLETE,
-    GL_LEQUAL, GL_LINEAR, GL_LINK_STATUS, GL_NEAREST, GL_ONE,
-    GL_ONE_MINUS_SRC_ALPHA, GL_R32F, GL_RED, GL_RENDERBUFFER, GL_RGB, GL_RGB32F, GL_RGBA,
-    GL_RGBA16F, GL_RGBA8, GL_SRC_ALPHA, GL_STREAM_DRAW, GL_TEXTURE0,
-    GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_TEXTURE_MIN_FILTER,
+    GL_LEQUAL, GL_LINEAR, GL_LINEAR_MIPMAP_LINEAR, GL_LINK_STATUS,
+    GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, GL_MIRRORED_REPEAT, GL_NEAREST,
+    GL_NUM_EXTENSIONS, GL_ONE,
+    GL_ONE_MINUS_SRC_ALPHA, GL_R32F, GL_RED, GL_RENDERBUFFER, GL_REPEAT, GL_RGB,
+    GL_RGB32F, GL_RGBA,
+    GL_RGBA16F, GL_RGBA8, GL_SRC_ALPHA, GL_SRGB8, GL_SRGB8_ALPHA8,
+    GL_STREAM_DRAW, GL_TEXTURE0,
+    GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_TEXTURE_MAX_ANISOTROPY_EXT,
+    GL_TEXTURE_MIN_FILTER,
     GL_TEXTURE_WRAP_S, GL_TEXTURE_WRAP_T, GL_TRIANGLES, GL_TRUE,
     GL_UNPACK_ALIGNMENT, GL_UNSIGNED_BYTE, GL_VERSION, GL_VERTEX_SHADER
 }
@@ -80,6 +89,28 @@ impl Gpu {
                 return ""
             }
             return _cstrToString(p)
+        }
+    }
+
+    // Whether the driver advertises an extension, by its full name including the
+    // vendor prefix — "GL_EXT_texture_filter_anisotropic", not the bare suffix.
+    //
+    // A core profile does not answer glGetString(GL_EXTENSIONS): that returned one
+    // space-separated string before 3.0 and is an error afterwards, so the list has
+    // to be walked one index at a time.
+    fn hasExtension(name: &string): bool {
+        unsafe {
+            var n: i32 = 0
+            glGetIntegerv(GL_NUM_EXTENSIONS, n.addrOf())
+            var i: i32 = 0
+            while i < n {
+                let p = glGetStringi(GL_EXTENSIONS, i as u32)
+                if (p as i64) != 0 && _cstrToString(p) == name {
+                    return true
+                }
+                i = i + 1
+            }
+            return false
         }
     }
 
@@ -383,8 +414,7 @@ impl Mesh {
     fn upload(self: &mut Self, data: &Vec<f32>) {
         // A partial trailing vertex is silently truncated by the integer divide, so
         // the draw is short by one triangle with nothing to point at.
-        assert(data.len % self.floatsPerVertex == 0,
-            "Mesh.upload: data length is not a whole number of vertices")
+        assert(data.len % self.floatsPerVertex == 0, "Mesh.upload: data length is not a whole number of vertices")
         unsafe {
             glBindBuffer(GL_ARRAY_BUFFER, self.vbo)
             glBufferData(GL_ARRAY_BUFFER, (data.len * 4) as i64, data.ptr() as *u8, GL_STREAM_DRAW)
@@ -449,6 +479,26 @@ void main() {
 
 // ── textures ──────────────────────────────────────────────────────────────────
 
+// How a UV outside 0..1 addresses the texture.
+//
+// `Clamp` is the default every constructor here starts from, and it is the right
+// answer for a texture that is a picture of the whole frame: a blur tap that runs
+// off the edge should read the edge texel, not wrap round and drag the far side
+// of the image in.
+//
+// `Repeat` is for a texture that tiles — a detail pattern laid over terrain, where
+// the UV is world position over a fixed period and is expected to run to hundreds.
+//
+// `Mirror` repeats but flips on every other period, so there is no seam where the
+// pattern restarts. It is also what a finite map wants when the world around it
+// reflects rather than wraps: the imagery has to fold on exactly the same period
+// as the geometry or the two disagree at every edge.
+pub enum Wrap {
+    Clamp,
+    Repeat,
+    Mirror,
+}
+
 @noCopy
 pub struct Texture2D {
     id: u32,
@@ -457,6 +507,26 @@ pub struct Texture2D {
 }
 
 impl Texture2D {
+    // Three sRGB bytes per pixel — the layout a PNG decodes to and the one an
+    // aerial photograph or a hand-authored sheet is already in.
+    //
+    // The point of GL_SRGB8 over GL_RGB8 is that the sampler decodes to linear in
+    // hardware, before filtering. Doing it afterwards on the shader side is both
+    // slower and wrong: a bilinear tap averages four sRGB bytes, and the average
+    // of two sRGB values is not the sRGB of their linear average, so edges come
+    // out darker than they should. Passing bytes through a 256-entry lookup table
+    // per fetch has the same flaw and costs a dependent read.
+    fn srgb8(w: i64, h: i64, pixels: &Vec<u8>, smooth: bool): Texture2D {
+        assert(pixels.len >= w * h * 3, "Texture2D.srgb8: pixels is shorter than w*h*3")
+        unsafe {
+            let id = newTexture(smooth)
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_SRGB8, w as i32, h as i32, 0, GL_RGB, GL_UNSIGNED_BYTE, pixels.ptr() as *u8)
+            return Texture2D {
+                id: id, w: w, h: h
+            }
+        }
+    }
+
     // An 8-bit RGBA texture from packed ABGR8888 words — the same layout the
     // software renderers here hand to SDL, so a CPU framebuffer uploads with no
     // repacking.
@@ -559,6 +629,76 @@ impl Texture2D {
         unsafe {
             glBindTexture(GL_TEXTURE_2D, self.id)
             glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, self.w as i32, self.h as i32, GL_RGBA, GL_UNSIGNED_BYTE, pixels.ptr() as *u8)
+        }
+    }
+
+    // Change how UVs outside 0..1 address this texture. Every constructor starts
+    // at `Wrap.Clamp`; this is separate from them rather than a parameter on each
+    // because it is a property of how the texture is *used*, and the same upload
+    // path serves a tiling detail texture and a full-frame image.
+    fn setWrap(self: &Self, wrap: Wrap) {
+        var mode = GL_CLAMP_TO_EDGE
+        match wrap {
+            Wrap.Clamp => {
+            }
+            Wrap.Repeat => {
+                mode = GL_REPEAT as i32
+            }
+            Wrap.Mirror => {
+                mode = GL_MIRRORED_REPEAT
+            }
+        }
+        unsafe {
+            glBindTexture(GL_TEXTURE_2D, self.id)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, mode)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, mode)
+        }
+    }
+
+    // Build the mip chain and switch minification to trilinear.
+    //
+    // Call it AFTER the pixels are uploaded — it derives the smaller levels from
+    // level 0, so on an empty texture it fills the chain with nothing.
+    //
+    // This is not optional for a texture that tiles across a 3D surface. Without
+    // mips, a pattern seen at a distance samples one texel out of every dozen the
+    // pixel covers, and which texel that is changes as the camera moves: the
+    // ground crawls and glitters. Mips are what make a far-off surface settle.
+    fn generateMipmaps(self: &Self) {
+        unsafe {
+            glBindTexture(GL_TEXTURE_2D, self.id)
+            glGenerateMipmap(GL_TEXTURE_2D)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR as i32)
+        }
+    }
+
+    // Sharpen a mipmapped texture seen at a grazing angle, up to `want` samples.
+    //
+    // Trilinear picks one mip level for the whole pixel from its widest axis, so
+    // ground stretching to the horizon is blurred along the direction it is NOT
+    // compressed in — the road surface goes to mud a hundred metres out while
+    // still being perfectly sharp sideways. Anisotropic filtering takes several
+    // samples along the long axis instead.
+    //
+    // Silently does nothing without GL_EXT_texture_filter_anisotropic (not core
+    // until 4.6) and clamps to the driver's maximum, so `setAnisotropy(16.0)` is
+    // always a safe thing to ask for. Needs mips: it selects between levels.
+    fn setAnisotropy(self: &Self, want: f64) {
+        if !Gpu.hasExtension("GL_EXT_texture_filter_anisotropic") {
+            return
+        }
+        unsafe {
+            var most: f32 = 1.0
+            glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, most.addrOf())
+            var use = want
+            if use > (most as f64) {
+                use = most as f64
+            }
+            if use < 1.0 {
+                use = 1.0
+            }
+            glBindTexture(GL_TEXTURE_2D, self.id)
+            glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, use as f32)
         }
     }
 

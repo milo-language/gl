@@ -5,7 +5,7 @@ layer over them. No dependencies beyond the standard library.
 
 ```bash
 milo add github.com/milo-language/gl            # latest release
-milo add github.com/milo-language/gl@v0.1.0     # or pin a specific tag
+milo add github.com/milo-language/gl@v0.1.1     # or pin a specific tag
 ```
 
 ```milo
@@ -43,6 +43,31 @@ Uploads are bounds-checked too — the driver reads `w * h` elements off a point
 idea how long your `Vec` is, so a short one would be a heap over-read from a call with no
 `unsafe` at the call site.
 
+## Textures for 3D, not just for full-frame passes
+
+The constructors all start clamped, unfiltered and mip-less, which is right for a texture
+that is a picture of the whole frame. A texture laid over 3D geometry wants the other
+three:
+
+```milo
+let ground = Texture2D.srgb8(w, h, bytes, true)
+ground.setWrap(Wrap.Repeat)      // UV is world position over a period, not 0..1
+ground.generateMipmaps()         // after the upload — it derives the chain from level 0
+ground.setAnisotropy(16.0)       // no-op without GL_EXT_texture_filter_anisotropic
+```
+
+`srgb8` takes three sRGB bytes per pixel — what a PNG decodes to — and the sampler
+decodes to linear **in hardware, before filtering**. Doing it afterwards in the shader is
+both slower and wrong: a bilinear tap averages four sRGB bytes, and the average of two
+sRGB values is not the sRGB of their linear average, so edges come out too dark. A
+lookup table per fetch has the same flaw and costs a dependent read.
+
+Mipmaps are not optional for anything tiled across a 3D surface. Without them a distant
+pattern samples one texel out of the dozen the pixel covers, and which one changes as the
+camera moves — the ground crawls and glitters. Anisotropy then fixes what mips alone get
+wrong at a grazing angle, where trilinear picks one level from the pixel's widest axis and
+blurs the direction that was not compressed.
+
 ## darwin and linux only
 
 `milo.json` declares `"targets": ["darwin", "linux"]`, and the compiler enforces it —
@@ -55,9 +80,12 @@ that every Mesa and every driver of the last decade has it.
 ## A context is your job
 
 Every call needs a current GL context, and creating one belongs to the window system, not
-here — this package deliberately does not depend on SDL, GLFW, or any windowing library.
-With SDL2 that is `SDL_GL_SetAttribute` + `SDL_WINDOW_OPENGL` + `SDL_GL_CreateContext`.
-Calling into GL with no context bound is undefined behaviour, not an error return.
+here — the library deliberately depends on nothing but the standard library. With SDL2
+that is `SDL_GL_SetAttribute` + `SDL_WINDOW_OPENGL` + `SDL_GL_CreateContext`, which the
+[`sdl`](https://github.com/milo-language/milo-sdl) package's `sdl/gl` module provides;
+`examples/` and `tests/` use it, and they carry that dependency in their own manifests so
+the published package does not. Calling into GL with no context bound is undefined
+behaviour, not an error return.
 
 ## Verified bindings
 

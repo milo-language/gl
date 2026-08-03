@@ -1,0 +1,7 @@
+{
+  "name": "gl-examples",
+  "version": "0.0.0",
+  "deps": {
+    "sdl": "github.com/milo-language/milo-sdl@v0.2.0"
+  }
+}

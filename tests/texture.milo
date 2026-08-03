@@ -1,0 +1,147 @@
+// Checks the texture sampling surface against a real driver: sRGB decode, the wrap
+// modes, mipmaps and anisotropy.
+//
+//   milo run tests/texture.milo
+//
+// The sRGB check is the one worth having. `Texture2D.srgb8` claims the hardware decodes
+// to linear before filtering, and the difference between that happening and not is
+// invisible in the code — it is one internal-format enum. So the test uploads a known
+// byte, renders it, reads it back, and compares against the number the sRGB transfer
+// function says it should be. A GL_RGB8 texture would come back as the byte it went in
+// as, which is the failure this catches.
+from "../lib" import {
+    Gpu, Mesh, Shader, Target, Texture2D, Wrap, readPixelsRgba8
+}
+from "sdl" import {
+    SDL_CreateWindow, SDL_DestroyWindow, SDL_GetError, SDL_Init, SDL_Quit,
+    SDL_INIT_VIDEO, SDL_WINDOWPOS_CENTERED, SDL_WINDOW_SHOWN
+}
+from "sdl/gl" import {
+    SDL_GL_CreateContext, SDL_GL_DeleteContext, SDL_GL_SetAttribute,
+    SDL_GL_CONTEXT_MAJOR_VERSION, SDL_GL_CONTEXT_MINOR_VERSION,
+    SDL_GL_CONTEXT_PROFILE_CORE, SDL_GL_CONTEXT_PROFILE_MASK, SDL_WINDOW_OPENGL
+}
+
+// 188/255 = 0.7373 sRGB, which is ((0.7373 + 0.055) / 1.055) ^ 2.4 = 0.5030 linear,
+// or 128 back in 8-bit. Chosen because 188 and 128 are far apart: a test whose pass
+// and fail values differ by a rounding step is not a test.
+let SRGB_BYTE: i64 = 188
+let WANT_LINEAR_BYTE: i64 = 128
+
+let SAMPLE_FRAG: string = "#version 330 core
+in vec2 vUv;
+out vec4 fragColor;
+uniform sampler2D uTex;
+void main() {
+    fragColor = vec4(texture(uTex, vUv).rgb, 1.0);
+}
+"
+
+fn main(): i32 {
+    unsafe {
+        if SDL_Init(SDL_INIT_VIDEO) != 0 {
+            print("no video subsystem — skipping")
+            print("ok")
+            return 0
+        }
+        let _ = SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3)
+        let _ = SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3)
+        let _ = SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE)
+        let win = SDL_CreateWindow("gl texture test", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 64, 64, SDL_WINDOW_SHOWN | SDL_WINDOW_OPENGL)
+        if (win as i64) == 0 {
+            print("no video device — skipping: " + _cstrToString(SDL_GetError()))
+            print("ok")
+            SDL_Quit()
+            return 0
+        }
+        let ctx = SDL_GL_CreateContext(win)
+        if (ctx as i64) == 0 {
+            print("no GL 3.3 core context: " + _cstrToString(SDL_GetError()))
+            SDL_DestroyWindow(win)
+            SDL_Quit()
+            return 1
+        }
+
+        let code = run()
+
+        SDL_GL_DeleteContext(ctx)
+        SDL_DestroyWindow(win)
+        SDL_Quit()
+        return code
+    }
+}
+
+fn run(): i32 {
+    // Big enough that the mip chain has more than one level to build.
+    let n = 8
+    var bytes: Vec<u8> = Vec.filled(n * n * 3, SRGB_BYTE as u8)
+    let tex = Texture2D.srgb8(n, n, bytes, true)
+    tex.setWrap(Wrap.Repeat)
+    tex.generateMipmaps()
+    tex.setAnisotropy(16.0)
+    if Gpu.error() != 0 {
+        print("gl error after building the texture")
+        tex.free()
+        return 1
+    }
+
+    // Mirror and clamp go through the same path; exercise them so a typo in one
+    // arm of the match is not invisible.
+    tex.setWrap(Wrap.Mirror)
+    tex.setWrap(Wrap.Clamp)
+
+    var shader = Shader.compile("#version 330 core
+layout (location = 0) in vec2 aPos;
+layout (location = 1) in vec2 aUv;
+out vec2 vUv;
+void main() {
+    vUv = aUv;
+    gl_Position = vec4(aPos, 0.0, 1.0);
+}
+", SAMPLE_FRAG)
+    match shader {
+        Result.Ok(sh) => {
+            let target = Target.new(4, 4, false, false)
+            match target {
+                Result.Ok(t) => {
+                    t.bind()
+                    Gpu.clear(0.0, 0.0, 0.0, 1.0, false)
+                    sh.bind()
+                    sh.sampler("uTex", tex, 0)
+                    let quad = Mesh.fullscreenQuad()
+                    quad.draw()
+                    let px = readPixelsRgba8(4, 4)
+                    quad.free()
+                    t.free()
+                    sh.free()
+                    tex.free()
+
+                    let red = (px[0] & 0xFF) as i64
+                    var off = red - WANT_LINEAR_BYTE
+                    if off < 0 {
+                        off = 0 - off
+                    }
+                    // One 8-bit step of slack for the driver's rounding; anything
+                    // wider than that and the decode is not happening.
+                    if off > 1 {
+                        print($"srgb decode: read {red}, want {WANT_LINEAR_BYTE} (raw byte was {SRGB_BYTE})")
+                        return 1
+                    }
+                    print("ok")
+                    return 0
+                }
+                Result.Err(e) => {
+                    print("target: " + e)
+                    sh.free()
+                    tex.free()
+                    return 1
+                }
+            }
+        }
+        Result.Err(e) => {
+            print("shader: " + e)
+            tex.free()
+            return 1
+        }
+    }
+}
